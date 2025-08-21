@@ -1,0 +1,15 @@
+{
+  "name": "xvision-project",
+  "version": "0.1.0",
+  "description": "Prototype of a 3D DevTools visualizer built for high‑performance and extensibility.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "chrome-remote-interface": "^0.31.1",
+    "ws": "^8.15.1",
+    "three": "^0.152.0"
+  },
+  "private": true
+}
