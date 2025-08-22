@@ -58,11 +58,29 @@
     return 0xaaaaaa; // Unknown – grey
   }
 
+  // Shared geometry and material cache to minimise allocations
+  const requestGeometry = new THREE.SphereGeometry(0.3, 16, 16);
+  const materialCache = {};
+  function getStatusMaterial(status) {
+    const color = statusToColor(status);
+    if (!materialCache[color]) {
+      materialCache[color] = new THREE.MeshPhongMaterial({ color });
+    }
+    return materialCache[color];
+  }
+
+  // Simple object pool for reusing sphere meshes
+  const spherePool = [];
+
   // Create a sphere mesh for a network request
   function createRequestSphere(event) {
-    const geometry = new THREE.SphereGeometry(0.3, 16, 16);
-    const material = new THREE.MeshPhongMaterial({ color: statusToColor(event.status) });
-    const sphere = new THREE.Mesh(geometry, material);
+    let sphere;
+    if (spherePool.length > 0) {
+      sphere = spherePool.pop();
+      sphere.material = getStatusMaterial(event.status);
+    } else {
+      sphere = new THREE.Mesh(requestGeometry, getStatusMaterial(event.status));
+    }
     // Assign initial position on a circle around the nucleus
     const angle = Math.random() * Math.PI * 2;
     const radius = 5 + Math.random() * 5;
@@ -118,9 +136,8 @@
         const sphere = requestMap.get(event.id);
         if (sphere) {
           requestGroup.remove(sphere);
-          sphere.geometry.dispose();
-          sphere.material.dispose();
           requestMap.delete(event.id);
+          spherePool.push(sphere);
         }
       } else if (event.kind === 'exception') {
         // Flash nucleus to indicate an exception occurred
