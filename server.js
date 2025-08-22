@@ -38,7 +38,23 @@ const server = http.createServer((req, res) => {
 });
 
 // ---- WebSocket server (3D client connects here) --------------------------
-const wss = new WebSocket.Server({ server });
+// Verify incoming WebSocket upgrade requests before establishing a connection
+const wss = new WebSocket.Server({
+  server,
+  verifyClient: (info, done) => {
+    const origin = info.origin;
+    const url = new URL(info.req.url ?? '/', 'http://localhost');
+    const token = url.searchParams.get('token');
+
+    if ((ALLOWED_ORIGIN && origin !== ALLOWED_ORIGIN) ||
+        (SHARED_SECRET && token !== SHARED_SECRET)) {
+      console.warn(`[${nowIso()}] WS rejected: remote=${info.req.socket.remoteAddress} origin=${origin}`);
+      return done(false, 401, 'Unauthorized');
+    }
+
+    done(true);
+  }
+});
 
 /** Track connected clients and ping/pong heartbeats */
 const clients = new Set();
@@ -46,19 +62,7 @@ const HEARTBEAT_MS = 15_000;
 
 function nowIso() { return new Date().toISOString(); }
 
-wss.on('connection', (ws, req) => {
-  // Security gate: origin + shared secret (if configured)
-  const origin = req.headers.origin;
-  const url = new URL(req.url ?? '/', 'http://localhost'); // base required
-  const token = url.searchParams.get('token');
-
-  if ((ALLOWED_ORIGIN && origin !== ALLOWED_ORIGIN) ||
-      (SHARED_SECRET && token !== SHARED_SECRET)) {
-    console.warn(`[${nowIso()}] WS rejected: remote=${req.socket.remoteAddress} origin=${origin}`);
-    ws.close(1008, 'Unauthorized');
-    return;
-  }
-
+wss.on('connection', (ws) => {
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
@@ -72,10 +76,12 @@ wss.on('connection', (ws, req) => {
 
   ws.on('error', (err) => {
     console.warn(`[${nowIso()}] WS client error: ${err.message}`);
-  });
-  ws.on('error', (err) => {
-    console.error('WebSocket error:', err);
     clients.delete(ws);
+    try {
+      ws.terminate();
+    } catch (closeErr) {
+      console.error('Error terminating socket:', closeErr);
+    }
   });
 });
 
@@ -96,20 +102,21 @@ const heartbeat = setInterval(() => {
 function broadcast(event) {
   const payload = JSON.stringify(event);
   for (const ws of clients) {
-    if (ws.readyState === WebSocket.OPEN) {
+    if (ws.readyState !== WebSocket.OPEN) {
+      clients.delete(ws);
+      continue;
+    }
+    try {
+      ws.send(payload);
+    } catch (err) {
+      console.error('Error sending to client:', err);
+      clients.delete(ws);
       try {
-        ws.send(payload);
-      } catch (err) {
-        console.error('Error sending to client:', err);
-        clients.delete(ws);
-        try {
-          ws.terminate();
-        } catch (closeErr) {
-          console.error('Error terminating socket:', closeErr);
-        }
+        ws.terminate();
+      } catch (closeErr) {
+        console.error('Error terminating socket:', closeErr);
       }
     }
-    ws.send(payload);
   }
 }
 
