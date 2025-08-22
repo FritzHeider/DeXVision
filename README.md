@@ -44,6 +44,11 @@ chrome --remote-debugging-port=9222
    npm start
    ```
 
+   Optionally restrict incoming WebSocket connections by setting
+   `ALLOWED_ORIGIN` to a specific origin or `SHARED_SECRET` to require a
+   token. When using `SHARED_SECRET`, clients must include
+   `?token=<your-token>` in the WebSocket URL.
+
 3. **Open the client**
 
    Navigate to `file:///<path>/xvision_project/public/index.html` in any browser. For full functionality you may need to run a static server (e.g. `npx http-server ./public`).
