@@ -54,6 +54,31 @@ chrome --remote-debugging-port=9222
 
    - Open DevTools in the tab you want to inspect and interact with the page to see events visualised.
 
+## macOS Step-by-Step
+
+Follow these steps to run DeXVision on a Mac:
+
+1. **Start Chrome with remote debugging**
+
+   ```bash
+   open -a "Google Chrome" --args --remote-debugging-port=9222
+   ```
+
+2. **Install dependencies and run the server**
+
+   ```bash
+   npm install
+   npm start
+   ```
+
+3. **Serve the client and open the visualiser**
+
+   ```bash
+   npx http-server ./public -p 8000
+   ```
+
+   Then visit `http://localhost:8000` in Chrome and interact with the page you want to inspect to see events visualised.
+
 ## Configuration
 
 Connection retries to Chrome can be tuned with:
