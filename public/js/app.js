@@ -119,10 +119,18 @@
 
   // WebSocket connection to the server
   // Allow overriding the host via ?host= query param or a global config variable
+  // and fall back to localhost if window.location.hostname is empty.
   const params = new URLSearchParams(window.location.search);
-  const hostOverride = params.get('host') || window.DEX_WS_HOST;
-  const wsHost = hostOverride || window.location.hostname || 'localhost';
-  const socket = new WebSocket(`ws://${wsHost}:8080`);
+
+  function resolveWsHost() {
+    const override = params.get('host') || window.DEX_WS_HOST;
+    if (override) return override;
+
+    const { hostname } = window.location;
+    return hostname && hostname.length > 0 ? hostname : 'localhost';
+  }
+
+  const socket = new WebSocket(`ws://${resolveWsHost()}:8080`);
   socket.addEventListener('open', () => {
     console.log('WebSocket connection established');
   });
