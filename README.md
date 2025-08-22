@@ -50,6 +50,13 @@ chrome --remote-debugging-port=9222
 
 4. **Open DevTools in the tab you wish to inspect** and interact with the page. You should see coloured orbits correspond to network requests, with exceptions causing a flash.
 
+### Configuration
+
+The server retries connections to Chrome when an initial attempt fails or a session disconnects. You can tune this behaviour with environment variables:
+
+- `RETRY_INTERVAL_MS` – base delay in milliseconds between retry attempts (default `1000`).
+- `MAX_RETRY_ATTEMPTS` – maximum number of attempts before giving up (default `5`).
+
 ## Next Steps for a Production‑Ready Release
 
 This prototype is a foundation. To achieve a 10/10 on all metrics, consider the following enhancements:

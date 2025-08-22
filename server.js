@@ -29,6 +29,8 @@ const WebSocket = require('ws');
 // Configuration
 const CDP_PORT = process.env.CDP_PORT || 9222;
 const WS_PORT = process.env.WS_PORT || 8080;
+const RETRY_INTERVAL_MS = parseInt(process.env.RETRY_INTERVAL_MS, 10) || 1000;
+const MAX_RETRY_ATTEMPTS = parseInt(process.env.MAX_RETRY_ATTEMPTS, 10) || 5;
 
 // Create a WebSocket server for clients (the 3D front‑end) to connect to.
 const wss = new WebSocket.Server({ port: WS_PORT });
@@ -55,81 +57,98 @@ function broadcast(event) {
 
 // Connect to the Chrome DevTools Protocol
 async function attachToChrome() {
-  try {
-    const tabs = await CDP.List({ port: CDP_PORT });
-    if (!tabs.length) {
-      throw new Error('No tabs available for debugging');
+  let attempt = 0;
+  while (attempt < MAX_RETRY_ATTEMPTS) {
+    try {
+      const tabs = await CDP.List({ port: CDP_PORT });
+      if (!tabs.length) {
+        throw new Error('No tabs available for debugging');
+      }
+      const target = tabs[0];
+      console.log(`Attaching to target: ${target.title}`);
+
+      const client = await CDP({
+        target,
+        port: CDP_PORT,
+      });
+      const { Network, Page, Runtime, Performance } = client;
+
+      client.on('disconnect', () => {
+        console.warn('CDP connection lost. Attempting to reconnect...');
+        attachToChrome();
+      });
+
+      // Enable domains we are interested in. More can be added here as the
+      // product matures (e.g. DOM, CSS, Log, Security). Each domain comes with
+      // additional overhead so selective enabling keeps the footprint low.
+      await Promise.all([
+        Network.enable({ maxTotalBufferSize: 65536, maxResourceBufferSize: 65536 }),
+        Page.enable(),
+        Runtime.enable(),
+        Performance.enable(),
+      ]);
+
+      // Broadcast network request events. Only send essential fields to keep
+      // bandwidth under control. This can be extended to include headers,
+      // cookies, etc. Provide color code hints to the client.
+      Network.responseReceived((params) => {
+        const { requestId, response, loaderId, type } = params;
+        broadcast({
+          kind: 'network',
+          id: requestId,
+          url: response.url,
+          status: response.status,
+          type,
+          protocol: response.protocol,
+          encodedDataLength: response.encodedDataLength,
+        });
+      });
+
+      Network.loadingFinished((params) => {
+        const { requestId, encodedDataLength } = params;
+        broadcast({
+          kind: 'networkFinish',
+          id: requestId,
+          encodedDataLength,
+        });
+      });
+
+      // Broadcast JavaScript runtime exceptions
+      Runtime.exceptionThrown((params) => {
+        broadcast({
+          kind: 'exception',
+          text: params.exceptionDetails.text,
+          url: params.exceptionDetails.url,
+          lineNumber: params.exceptionDetails.lineNumber,
+          columnNumber: params.exceptionDetails.columnNumber,
+        });
+      });
+
+      // Broadcast basic performance metrics periodically
+      async function emitPerformanceMetrics() {
+        const metrics = await Performance.getMetrics();
+        broadcast({
+          kind: 'performance',
+          metrics: metrics.metrics,
+        });
+        setTimeout(emitPerformanceMetrics, 1000);
+      }
+      emitPerformanceMetrics();
+
+      console.log(`Server ready. Navigate to http://localhost:${WS_PORT} in the client`);
+      return;
+    } catch (err) {
+      attempt++;
+      console.error('Error connecting to Chrome:', err.message);
+      if (attempt >= MAX_RETRY_ATTEMPTS) {
+        console.error('Make sure Chrome is running with --remote-debugging-port=9222');
+        console.error(`Exceeded maximum retry attempts (${MAX_RETRY_ATTEMPTS}).`);
+        break;
+      }
+      const delay = RETRY_INTERVAL_MS * Math.pow(2, attempt - 1);
+      console.log(`Retrying in ${delay}ms...`);
+      await new Promise((resolve) => setTimeout(resolve, delay));
     }
-    const target = tabs[0];
-    console.log(`Attaching to target: ${target.title}`);
-
-    const client = await CDP({
-      target,
-      port: CDP_PORT,
-    });
-    const { Network, Page, Runtime, Performance } = client;
-
-    // Enable domains we are interested in. More can be added here as the
-    // product matures (e.g. DOM, CSS, Log, Security). Each domain comes with
-    // additional overhead so selective enabling keeps the footprint low.
-    await Promise.all([
-      Network.enable({ maxTotalBufferSize: 65536, maxResourceBufferSize: 65536 }),
-      Page.enable(),
-      Runtime.enable(),
-      Performance.enable(),
-    ]);
-
-    // Broadcast network request events. Only send essential fields to keep
-    // bandwidth under control. This can be extended to include headers,
-    // cookies, etc. Provide color code hints to the client.
-    Network.responseReceived((params) => {
-      const { requestId, response, loaderId, type } = params;
-      broadcast({
-        kind: 'network',
-        id: requestId,
-        url: response.url,
-        status: response.status,
-        type,
-        protocol: response.protocol,
-        encodedDataLength: response.encodedDataLength,
-      });
-    });
-
-    Network.loadingFinished((params) => {
-      const { requestId, encodedDataLength } = params;
-      broadcast({
-        kind: 'networkFinish',
-        id: requestId,
-        encodedDataLength,
-      });
-    });
-
-    // Broadcast JavaScript runtime exceptions
-    Runtime.exceptionThrown((params) => {
-      broadcast({
-        kind: 'exception',
-        text: params.exceptionDetails.text,
-        url: params.exceptionDetails.url,
-        lineNumber: params.exceptionDetails.lineNumber,
-        columnNumber: params.exceptionDetails.columnNumber,
-      });
-    });
-
-    // Broadcast basic performance metrics periodically
-    async function emitPerformanceMetrics() {
-      const metrics = await Performance.getMetrics();
-      broadcast({
-        kind: 'performance',
-        metrics: metrics.metrics,
-      });
-      setTimeout(emitPerformanceMetrics, 1000);
-    }
-    emitPerformanceMetrics();
-
-    console.log(`Server ready. Navigate to http://localhost:${WS_PORT} in the client`);
-  } catch (err) {
-    console.error('Error connecting to Chrome:', err.message);
-    console.error('Make sure Chrome is running with --remote-debugging-port=9222');
   }
 }
 
