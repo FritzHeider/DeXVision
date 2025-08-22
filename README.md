@@ -58,8 +58,11 @@ chrome --remote-debugging-port=9222
 
 Connection retries to Chrome can be tuned with:
 
-- `RETRY_INTERVAL_MS` – base delay between attempts (default `1000`).
-- `MAX_RETRY_ATTEMPTS` – maximum retries before giving up (default `5`).
+The browser client will also retry the WebSocket connection to the server using exponential backoff. This can be configured via query parameters or global variables:
+
+- `retryIntervalMs` (or `DEX_WS_RETRY_INTERVAL_MS`) – base delay between reconnection attempts in milliseconds (default `1000`).
+- `maxRetryAttempts` (or `DEX_WS_MAX_RETRY_ATTEMPTS`) – maximum number of reconnection attempts before giving up (default `5`).
+
 
 ## Roadmap
 
