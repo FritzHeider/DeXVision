@@ -25,17 +25,31 @@
 
 const CDP = require('chrome-remote-interface');
 const WebSocket = require('ws');
+const { URL } = require('url');
 
 // Configuration
 const CDP_PORT = process.env.CDP_PORT || 9222;
 const WS_PORT = process.env.WS_PORT || 8080;
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
+const SHARED_SECRET = process.env.SHARED_SECRET;
 
 // Create a WebSocket server for clients (the 3D front‑end) to connect to.
 const wss = new WebSocket.Server({ port: WS_PORT });
 
 // Track connected clients
 const clients = new Set();
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const origin = req.headers.origin;
+  const url = new URL(req.url, 'http://localhost');
+  const token = url.searchParams.get('token');
+
+  if ((ALLOWED_ORIGIN && origin !== ALLOWED_ORIGIN) ||
+      (SHARED_SECRET && token !== SHARED_SECRET)) {
+    console.warn(`Rejected connection from ${req.socket.remoteAddress} origin:${origin}`);
+    ws.close(1008, 'Unauthorized');
+    return;
+  }
+
   clients.add(ws);
   console.log('WebSocket client connected');
   ws.on('close', () => {
