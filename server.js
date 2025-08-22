@@ -41,6 +41,10 @@ wss.on('connection', (ws) => {
   ws.on('close', () => {
     clients.delete(ws);
   });
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err);
+    clients.delete(ws);
+  });
 });
 
 // Broadcast helper
@@ -48,7 +52,17 @@ function broadcast(event) {
   const payload = JSON.stringify(event);
   for (const ws of clients) {
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
+      try {
+        ws.send(payload);
+      } catch (err) {
+        console.error('Error sending to client:', err);
+        clients.delete(ws);
+        try {
+          ws.terminate();
+        } catch (closeErr) {
+          console.error('Error terminating socket:', closeErr);
+        }
+      }
     }
   }
 }
