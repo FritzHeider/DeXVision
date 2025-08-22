@@ -73,6 +73,10 @@ wss.on('connection', (ws, req) => {
   ws.on('error', (err) => {
     console.warn(`[${nowIso()}] WS client error: ${err.message}`);
   });
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err);
+    clients.delete(ws);
+  });
 });
 
 // Heartbeat to prune dead sockets
@@ -92,11 +96,18 @@ const heartbeat = setInterval(() => {
 function broadcast(event) {
   const payload = JSON.stringify(event);
   for (const ws of clients) {
-    if (ws.readyState !== WebSocket.OPEN) continue;
-    // avoid unbounded buffering
-    if (ws.bufferedAmount > 5 * 1024 * 1024) {
-      // 5MB buffered; drop this frame for this client
-      continue;
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(payload);
+      } catch (err) {
+        console.error('Error sending to client:', err);
+        clients.delete(ws);
+        try {
+          ws.terminate();
+        } catch (closeErr) {
+          console.error('Error terminating socket:', closeErr);
+        }
+      }
     }
     ws.send(payload);
   }

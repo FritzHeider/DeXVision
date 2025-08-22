@@ -7,9 +7,9 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "chrome-remote-interface": "^0.31.1",
-    "ws": "^8.15.1",
-    "three": "^0.152.0"
+    "chrome-remote-interface": "0.31.1",
+    "ws": "8.15.1",
+    "three": "0.152.0"
   },
   "private": true
 }
