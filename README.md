@@ -62,6 +62,11 @@ The server retries connections to Chrome when an initial attempt fails or a sess
 - `RETRY_INTERVAL_MS` – base delay in milliseconds between retry attempts (default `1000`).
 - `MAX_RETRY_ATTEMPTS` – maximum number of attempts before giving up (default `5`).
 
+The browser client will also retry the WebSocket connection to the server using exponential backoff. This can be configured via query parameters or global variables:
+
+- `retryIntervalMs` (or `DEX_WS_RETRY_INTERVAL_MS`) – base delay between reconnection attempts in milliseconds (default `1000`).
+- `maxRetryAttempts` (or `DEX_WS_MAX_RETRY_ATTEMPTS`) – maximum number of reconnection attempts before giving up (default `5`).
+
 ## Next Steps for a Production‑Ready Release
 
 This prototype is a foundation. To achieve a 10/10 on all metrics, consider the following enhancements:

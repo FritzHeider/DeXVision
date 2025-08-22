@@ -117,45 +117,82 @@
   }
   window.addEventListener('resize', onWindowResize, false);
 
-  // WebSocket connection to the server
+  // WebSocket connection to the server with reconnection logic
   // Allow overriding the host via ?host= query param or a global config variable
   const params = new URLSearchParams(window.location.search);
   const hostOverride = params.get('host') || window.DEX_WS_HOST;
   const wsHost = hostOverride || window.location.hostname || 'localhost';
-  const socket = new WebSocket(`ws://${wsHost}:8080`);
-  socket.addEventListener('open', () => {
-    console.log('WebSocket connection established');
-  });
-  socket.addEventListener('message', (message) => {
-    try {
-      const event = JSON.parse(message.data);
-      // Filter to avoid overloading the scene. In a production build you
-      // might allow the user to select which event types to render.
-      if (event.kind === 'network') {
-        const sphere = createRequestSphere(event);
-        requestMap.set(event.id, sphere);
-        requestGroup.add(sphere);
-      } else if (event.kind === 'networkFinish') {
-        // Remove finished request from scene
-        const sphere = requestMap.get(event.id);
-        if (sphere) {
-          requestGroup.remove(sphere);
-          requestMap.delete(event.id);
-          spherePool.push(sphere);
-        }
-      } else if (event.kind === 'exception') {
-        // Flash nucleus to indicate an exception occurred
-        nucleus.material.color.setHex(0xff0000);
-        setTimeout(() => nucleus.material.color.setHex(0x00aaff), 300);
-      } else if (event.kind === 'performance') {
-        // You could visualise metrics (e.g. CPU, memory) here. For brevity we
-        // simply log them. Extend this to add rings or gauges.
-        console.log('Performance metrics:', event.metrics);
+  const RETRY_INTERVAL_MS = parseInt(
+    params.get('retryIntervalMs') || window.DEX_WS_RETRY_INTERVAL_MS || '1000',
+    10
+  );
+  const MAX_RETRY_ATTEMPTS = parseInt(
+    params.get('maxRetryAttempts') || window.DEX_WS_MAX_RETRY_ATTEMPTS || '5',
+    10
+  );
+
+  let socket;
+  let retryAttempt = 0;
+
+  function connect() {
+    socket = new WebSocket(`ws://${wsHost}:8080`);
+
+    socket.addEventListener('open', () => {
+      console.log('WebSocket connection established');
+      retryAttempt = 0; // reset backoff after successful connection
+    });
+
+    socket.addEventListener('close', () => {
+      if (retryAttempt >= MAX_RETRY_ATTEMPTS) {
+        console.error('WebSocket connection closed. Max retry attempts reached.');
+        return;
       }
-    } catch (err) {
-      console.error('Error processing event', err);
-    }
-  });
+      retryAttempt += 1;
+      const delay = RETRY_INTERVAL_MS * Math.pow(2, retryAttempt - 1);
+      console.warn(
+        `WebSocket disconnected. Retrying in ${delay}ms (attempt ${retryAttempt}/${MAX_RETRY_ATTEMPTS})`
+      );
+      setTimeout(connect, delay);
+    });
+
+    socket.addEventListener('error', (err) => {
+      console.error('WebSocket error', err);
+      try { socket.close(); } catch {}
+    });
+
+    socket.addEventListener('message', (message) => {
+      try {
+        const event = JSON.parse(message.data);
+        // Filter to avoid overloading the scene. In a production build you
+        // might allow the user to select which event types to render.
+        if (event.kind === 'network') {
+          const sphere = createRequestSphere(event);
+          requestMap.set(event.id, sphere);
+          requestGroup.add(sphere);
+        } else if (event.kind === 'networkFinish') {
+          // Remove finished request from scene
+          const sphere = requestMap.get(event.id);
+          if (sphere) {
+            requestGroup.remove(sphere);
+            requestMap.delete(event.id);
+            spherePool.push(sphere);
+          }
+        } else if (event.kind === 'exception') {
+          // Flash nucleus to indicate an exception occurred
+          nucleus.material.color.setHex(0xff0000);
+          setTimeout(() => nucleus.material.color.setHex(0x00aaff), 300);
+        } else if (event.kind === 'performance') {
+          // You could visualise metrics (e.g. CPU, memory) here. For brevity we
+          // simply log them. Extend this to add rings or gauges.
+          console.log('Performance metrics:', event.metrics);
+        }
+      } catch (err) {
+        console.error('Error processing event', err);
+      }
+    });
+  }
+
+  connect();
 
   // Render loop
   let lastTime = performance.now();
