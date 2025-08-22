@@ -100,7 +100,11 @@
   window.addEventListener('resize', onWindowResize, false);
 
   // WebSocket connection to the server
-  const socket = new WebSocket(`ws://${window.location.hostname}:8080`);
+  // Allow overriding the host via ?host= query param or a global config variable
+  const params = new URLSearchParams(window.location.search);
+  const hostOverride = params.get('host') || window.DEX_WS_HOST;
+  const wsHost = hostOverride || window.location.hostname || 'localhost';
+  const socket = new WebSocket(`ws://${wsHost}:8080`);
   socket.addEventListener('open', () => {
     console.log('WebSocket connection established');
   });

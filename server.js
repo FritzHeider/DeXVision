@@ -1,86 +1,144 @@
-/*
- * server.js
+/* server.js
+ * Real-time CDP -> WebSocket bridge (minimal, robust)
  *
- * This file implements a minimal Node.js service that attaches to the Chrome
- * DevTools Protocol (CDP) via the chrome-remote-interface library and
- * broadcasts a stream of instrumentation events to connected WebSocket clients.
+ * Launch Chrome/Chromium with:  chrome --remote-debugging-port=9222
  *
- * The goal of this project is to lay the foundations for a high‑performance,
- * real‑time visualization of what ordinarily hides behind the browser’s
- * developer tools. The architecture emphasises local‑first processing,
- * extensibility (new event types can be registered without restarting the
- * server) and clear separation between data ingestion and rendering.
- *
- * To use this prototype you must launch Chrome (or Chromium) with the
- * --remote-debugging-port flag, for example:
- *
- *   chrome --remote-debugging-port=9222
- *
- * By default the script attaches to the first tab. It listens for network
- * requests, page lifecycle events and performance metrics. Messages are
- * broadcast over a WebSocket connection on port 8080. The companion
- * client (see public/js/app.js) consumes these messages to animate a 3D
- * representation.
+ * ENV:
+ *   CDP_PORT=9222
+ *   WS_PORT=8080
+ *   ALLOWED_ORIGIN=https://your.frontend.example
+ *   SHARED_SECRET=supersecret
+ *   RETRY_INTERVAL_MS=1000
+ *   MAX_RETRY_ATTEMPTS=5
  */
 
+'use strict';
+
+const http = require('http');
 const CDP = require('chrome-remote-interface');
 const WebSocket = require('ws');
+const { URL } = require('url');
 
-// Configuration
-const CDP_PORT = process.env.CDP_PORT || 9222;
-const WS_PORT = process.env.WS_PORT || 8080;
-const RETRY_INTERVAL_MS = parseInt(process.env.RETRY_INTERVAL_MS, 10) || 1000;
-const MAX_RETRY_ATTEMPTS = parseInt(process.env.MAX_RETRY_ATTEMPTS, 10) || 5;
+// ---- Config ---------------------------------------------------------------
+const CDP_PORT = parseInt(process.env.CDP_PORT || '9222', 10);
+const WS_PORT = parseInt(process.env.WS_PORT || '8080', 10);
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '';     // optional
+const SHARED_SECRET = process.env.SHARED_SECRET || '';       // optional
+const RETRY_INTERVAL_MS = parseInt(process.env.RETRY_INTERVAL_MS || '1000', 10);
+const MAX_RETRY_ATTEMPTS = parseInt(process.env.MAX_RETRY_ATTEMPTS || '5', 10);
 
-// Create a WebSocket server for clients (the 3D front‑end) to connect to.
-const wss = new WebSocket.Server({ port: WS_PORT });
+// ---- HTTP server (for WS upgrade + /health) -------------------------------
+const server = http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, cdpPort: CDP_PORT, wsPort: WS_PORT }));
+    return;
+  }
+  res.writeHead(404).end();
+});
 
-// Track connected clients
+// ---- WebSocket server (3D client connects here) --------------------------
+const wss = new WebSocket.Server({ server });
+
+/** Track connected clients and ping/pong heartbeats */
 const clients = new Set();
-wss.on('connection', (ws) => {
+const HEARTBEAT_MS = 15_000;
+
+function nowIso() { return new Date().toISOString(); }
+
+wss.on('connection', (ws, req) => {
+  // Security gate: origin + shared secret (if configured)
+  const origin = req.headers.origin;
+  const url = new URL(req.url ?? '/', 'http://localhost'); // base required
+  const token = url.searchParams.get('token');
+
+  if ((ALLOWED_ORIGIN && origin !== ALLOWED_ORIGIN) ||
+      (SHARED_SECRET && token !== SHARED_SECRET)) {
+    console.warn(`[${nowIso()}] WS rejected: remote=${req.socket.remoteAddress} origin=${origin}`);
+    ws.close(1008, 'Unauthorized');
+    return;
+  }
+
+  ws.isAlive = true;
+  ws.on('pong', () => { ws.isAlive = true; });
+
   clients.add(ws);
-  console.log('WebSocket client connected');
+  console.log(`[${nowIso()}] WS client connected (count=${clients.size})`);
+
   ws.on('close', () => {
     clients.delete(ws);
+    console.log(`[${nowIso()}] WS client disconnected (count=${clients.size})`);
+  });
+
+  ws.on('error', (err) => {
+    console.warn(`[${nowIso()}] WS client error: ${err.message}`);
   });
 });
 
-// Broadcast helper
+// Heartbeat to prune dead sockets
+const heartbeat = setInterval(() => {
+  for (const ws of clients) {
+    if (ws.isAlive === false) {
+      ws.terminate();
+      clients.delete(ws);
+      continue;
+    }
+    ws.isAlive = false;
+    try { ws.ping(); } catch {}
+  }
+}, HEARTBEAT_MS);
+
+// Broadcast helper with basic backpressure guard
 function broadcast(event) {
   const payload = JSON.stringify(event);
   for (const ws of clients) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(payload);
+    if (ws.readyState !== WebSocket.OPEN) continue;
+    // avoid unbounded buffering
+    if (ws.bufferedAmount > 5 * 1024 * 1024) {
+      // 5MB buffered; drop this frame for this client
+      continue;
     }
+    ws.send(payload);
   }
 }
 
-// Connect to the Chrome DevTools Protocol
-async function attachToChrome() {
+// ---- CDP attach / reattach logic -----------------------------------------
+let cdpClient = null;
+let shuttingDown = false;
+
+/** Find a reasonable target (first page tab) */
+async function findAttachableTarget() {
+  const list = await CDP.List({ port: CDP_PORT });
+  // Prefer type=page, not chrome://, not devtools
+  const page = list.find(t =>
+    (t.type === 'page' || t.type === 'background_page') &&
+    t.url && !t.url.startsWith('devtools://') && !t.url.startsWith('chrome://')
+  );
+  return page || list[0];
+}
+
+async function attachToChromeWithRetry(label = 'initial') {
   let attempt = 0;
-  while (attempt < MAX_RETRY_ATTEMPTS) {
+  while (!shuttingDown && attempt < MAX_RETRY_ATTEMPTS) {
     try {
-      const tabs = await CDP.List({ port: CDP_PORT });
-      if (!tabs.length) {
-        throw new Error('No tabs available for debugging');
-      }
-      const target = tabs[0];
-      console.log(`Attaching to target: ${target.title}`);
+      const target = await findAttachableTarget();
+      if (!target) throw new Error('No debuggable targets found');
 
-      const client = await CDP({
-        target,
-        port: CDP_PORT,
+      console.log(`[${nowIso()}] Attaching to target (${label}): ${target.title || target.url}`);
+
+      cdpClient = await CDP({ target, port: CDP_PORT });
+      const { Network, Page, Runtime, Performance } = cdpClient;
+
+      cdpClient.on('disconnect', () => {
+        if (shuttingDown) return;
+        console.warn(`[${nowIso()}] CDP disconnected. Reconnecting…`);
+        // fire and forget reattach (no loop blocking)
+        attachToChromeWithRetry('reconnect').catch(err =>
+          console.error(`[${nowIso()}] Reconnect failed: ${err.message}`)
+        );
       });
-      const { Network, Page, Runtime, Performance } = client;
 
-      client.on('disconnect', () => {
-        console.warn('CDP connection lost. Attempting to reconnect...');
-        attachToChrome();
-      });
-
-      // Enable domains we are interested in. More can be added here as the
-      // product matures (e.g. DOM, CSS, Log, Security). Each domain comes with
-      // additional overhead so selective enabling keeps the footprint low.
+      // Enable domains (tuned buffers for lower overhead)
       await Promise.all([
         Network.enable({ maxTotalBufferSize: 65536, maxResourceBufferSize: 65536 }),
         Page.enable(),
@@ -88,19 +146,18 @@ async function attachToChrome() {
         Performance.enable(),
       ]);
 
-      // Broadcast network request events. Only send essential fields to keep
-      // bandwidth under control. This can be extended to include headers,
-      // cookies, etc. Provide color code hints to the client.
+      // Network events
       Network.responseReceived((params) => {
-        const { requestId, response, loaderId, type } = params;
+        const { requestId, response, type } = params;
         broadcast({
           kind: 'network',
+          ts: Date.now(),
           id: requestId,
-          url: response.url,
-          status: response.status,
+          url: response?.url,
+          status: response?.status,
           type,
-          protocol: response.protocol,
-          encodedDataLength: response.encodedDataLength,
+          protocol: response?.protocol,
+          encodedDataLength: response?.encodedDataLength,
         });
       });
 
@@ -108,48 +165,83 @@ async function attachToChrome() {
         const { requestId, encodedDataLength } = params;
         broadcast({
           kind: 'networkFinish',
+          ts: Date.now(),
           id: requestId,
           encodedDataLength,
         });
       });
 
-      // Broadcast JavaScript runtime exceptions
+      // JS runtime exceptions
       Runtime.exceptionThrown((params) => {
+        const d = params?.exceptionDetails || {};
         broadcast({
           kind: 'exception',
-          text: params.exceptionDetails.text,
-          url: params.exceptionDetails.url,
-          lineNumber: params.exceptionDetails.lineNumber,
-          columnNumber: params.exceptionDetails.columnNumber,
+          ts: Date.now(),
+          text: d.text,
+          url: d.url,
+          lineNumber: d.lineNumber,
+          columnNumber: d.columnNumber,
         });
       });
 
-      // Broadcast basic performance metrics periodically
+      // Periodic performance metrics with self-scheduling guard
+      let perfTimer = null;
       async function emitPerformanceMetrics() {
-        const metrics = await Performance.getMetrics();
-        broadcast({
-          kind: 'performance',
-          metrics: metrics.metrics,
-        });
-        setTimeout(emitPerformanceMetrics, 1000);
+        if (!cdpClient || shuttingDown) return;
+        try {
+          const metrics = await Performance.getMetrics();
+          broadcast({ kind: 'performance', ts: Date.now(), metrics: metrics.metrics });
+        } catch (e) {
+          // swallow transient errors (tab navigated, etc.)
+        } finally {
+          perfTimer = setTimeout(emitPerformanceMetrics, 1000);
+        }
       }
       emitPerformanceMetrics();
 
-      console.log(`Server ready. Navigate to http://localhost:${WS_PORT} in the client`);
-      return;
+      console.log(`[${nowIso()}] CDP attached. Broadcasting on ws://localhost:${WS_PORT}`);
+      return; // success
     } catch (err) {
-      attempt++;
-      console.error('Error connecting to Chrome:', err.message);
+      attempt += 1;
+      const delay = RETRY_INTERVAL_MS * Math.pow(2, attempt - 1);
+      console.error(
+        `[${nowIso()}] CDP connect failed (attempt ${attempt}/${MAX_RETRY_ATTEMPTS}): ${err.message}`
+      );
       if (attempt >= MAX_RETRY_ATTEMPTS) {
-        console.error('Make sure Chrome is running with --remote-debugging-port=9222');
-        console.error(`Exceeded maximum retry attempts (${MAX_RETRY_ATTEMPTS}).`);
+        console.error(
+          `[${nowIso()}] Exceeded max attempts. Ensure Chrome runs with --remote-debugging-port=${CDP_PORT}.`
+        );
         break;
       }
-      const delay = RETRY_INTERVAL_MS * Math.pow(2, attempt - 1);
-      console.log(`Retrying in ${delay}ms...`);
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await new Promise(r => setTimeout(r, delay));
     }
   }
 }
 
-attachToChrome();
+// ---- Startup / Teardown ----------------------------------------------------
+server.listen(WS_PORT, () => {
+  console.log(`[${nowIso()}] WS listening on :${WS_PORT} (health: GET /health)`);
+  attachToChromeWithRetry().catch(err =>
+    console.error(`[${nowIso()}] Fatal CDP attach error: ${err.message}`)
+  );
+});
+
+function shutdown(code = 0) {
+  shuttingDown = true;
+  console.log(`[${nowIso()}] Shutting down…`);
+  clearInterval(heartbeat);
+  try { if (cdpClient) cdpClient.close(); } catch {}
+  for (const ws of clients) { try { ws.close(1001, 'Server shutdown'); } catch {} }
+  server.close(() => process.exit(code));
+}
+
+process.on('SIGINT', () => shutdown(0));
+process.on('SIGTERM', () => shutdown(0));
+process.on('uncaughtException', (e) => {
+  console.error(`[${nowIso()}] Uncaught exception:`, e);
+  shutdown(1);
+});
+process.on('unhandledRejection', (e) => {
+  console.error(`[${nowIso()}] Unhandled rejection:`, e);
+  shutdown(1);
+});
